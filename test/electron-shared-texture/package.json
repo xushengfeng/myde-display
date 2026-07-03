@@ -1,0 +1,14 @@
+{
+  "name": "electron-shared-texture-test",
+  "version": "1.0.0",
+  "description": "Test Electron shared texture with myde-display DRM rendering",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "electron": "43.0.0"
+  },
+  "devDependencies": {},
+  "private": true
+}

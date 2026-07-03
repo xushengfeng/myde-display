@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DRM Rendered Output</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a1a;
+      color: #ffffff;
+      padding: 20px;
+    }
+    
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    
+    h1 {
+      text-align: center;
+      margin-bottom: 20px;
+      color: #00ff88;
+    }
+    
+    .info-panel {
+      background: #2a2a2a;
+      border-radius: 8px;
+      padding: 15px;
+      margin-bottom: 20px;
+    }
+    
+    .info-panel h2 {
+      color: #00ff88;
+      margin-bottom: 10px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid #3a3a3a;
+    }
+    
+    .info-row:last-child {
+      border-bottom: none;
+    }
+    
+    .info-label {
+      color: #888;
+    }
+    
+    .info-value {
+      color: #fff;
+      font-weight: bold;
+    }
+    
+    .status-indicator {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 8px;
+    }
+    
+    .status-active {
+      background: #00ff88;
+      box-shadow: 0 0 10px #00ff88;
+    }
+    
+    .status-inactive {
+      background: #ff4444;
+    }
+    
+    .controls {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+    
+    button {
+      background: #00ff88;
+      color: #000;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: background 0.2s;
+    }
+    
+    button:hover {
+      background: #00cc6a;
+    }
+    
+    button:active {
+      background: #009950;
+    }
+    
+    .log-panel {
+      background: #2a2a2a;
+      border-radius: 8px;
+      padding: 15px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    
+    .log-panel h2 {
+      color: #00ff88;
+      margin-bottom: 10px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    
+    .log-entry {
+      padding: 5px 0;
+      border-bottom: 1px solid #3a3a3a;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+    }
+    
+    .log-entry:last-child {
+      border-bottom: none;
+    }
+    
+    .log-time {
+      color: #666;
+      margin-right: 10px;
+    }
+    
+    .log-info {
+      color: #00ff88;
+    }
+    
+    .log-error {
+      color: #ff4444;
+    }
+    
+    .log-warn {
+      color: #ffaa00;
+    }
+    
+    .texture-info {
+      background: #2a2a2a;
+      border-radius: 8px;
+      padding: 15px;
+      margin-bottom: 20px;
+    }
+    
+    .texture-info h2 {
+      color: #00ff88;
+      margin-bottom: 10px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    
+    .pixel-format {
+      display: inline-block;
+      background: #444;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🖥️ DRM Rendered Output</h1>
+    
+    <div class="info-panel">
+      <h2>System Status</h2>
+      <div class="info-row">
+        <span class="info-label">DRM Device</span>
+        <span class="info-value">
+          <span class="status-indicator status-active"></span>
+          /dev/dri/card0
+        </span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Rendering Mode</span>
+        <span class="info-value">Shared Texture (GPU)</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Frame Rate</span>
+        <span class="info-value" id="frameRate">30 FPS</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Frames Rendered</span>
+        <span class="info-value" id="frameCount">0</span>
+      </div>
+    </div>
+    
+    <div class="texture-info">
+      <h2>Texture Information</h2>
+      <div class="info-row">
+        <span class="info-label">Resolution</span>
+        <span class="info-value" id="textureSize">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Pixel Format</span>
+        <span class="info-value"><span class="pixel-format" id="pixelFormat">-</span></span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Last Update</span>
+        <span class="info-value" id="lastUpdate">-</span>
+      </div>
+    </div>
+    
+    <div class="controls">
+      <button onclick="rotateTexture()">Rotate 45°</button>
+      <button onclick="scaleTexture()">Scale 1.5x</button>
+      <button onclick="resetTransform()">Reset Transform</button>
+      <button onclick="getScreenInfo()">Get Screen Info</button>
+    </div>
+    
+    <div class="info-panel" id="screenInfoPanel" style="display: none;">
+      <h2>Screen Information</h2>
+      <div id="screenInfoContent"></div>
+    </div>
+    
+    <div class="log-panel">
+      <h2>Activity Log</h2>
+      <div id="logContainer"></div>
+    </div>
+  </div>
+  
+  <script>
+    let frameCount = 0;
+    let currentRotation = 0;
+    let currentScale = 1.0;
+    
+    // Logging function
+    function log(message, type = 'info') {
+      const logContainer = document.getElementById('logContainer');
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      
+      const time = new Date().toLocaleTimeString();
+      const typeClass = `log-${type}`;
+      
+      entry.innerHTML = `<span class="log-time">[${time}]</span><span class="${typeClass}">${message}</span>`;
+      logContainer.insertBefore(entry, logContainer.firstChild);
+      
+      // Keep only last 50 entries
+      while (logContainer.children.length > 50) {
+        logContainer.removeChild(logContainer.lastChild);
+      }
+    }
+    
+    // Update texture info
+    function updateTextureInfo(data) {
+      frameCount++;
+      document.getElementById('frameCount').textContent = frameCount;
+      
+      if (data.textureInfo) {
+        const size = data.textureInfo.codedSize;
+        document.getElementById('textureSize').textContent = `${size.width}x${size.height}`;
+        document.getElementById('pixelFormat').textContent = data.textureInfo.pixelFormat;
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+      }
+      
+      log(`Frame ${frameCount} received: ${data.dirty ? JSON.stringify(data.dirty) : 'full frame'}`);
+    }
+    
+    // Transform controls
+    function rotateTexture() {
+      currentRotation += Math.PI / 4; // 45 degrees
+      const transform = {
+        rotation: currentRotation,
+        originX: 400,
+        originY: 300
+      };
+      window.electronAPI.applyTransform(transform);
+      log(`Rotation applied: ${(currentRotation * 180 / Math.PI).toFixed(1)}°`);
+    }
+    
+    function scaleTexture() {
+      currentScale = currentScale === 1.0 ? 1.5 : 1.0;
+      const transform = {
+        scaleX: currentScale,
+        scaleY: currentScale,
+        originX: 400,
+        originY: 300
+      };
+      window.electronAPI.applyTransform(transform);
+      log(`Scale applied: ${currentScale}x`);
+    }
+    
+    function resetTransform() {
+      currentRotation = 0;
+      currentScale = 1.0;
+      window.electronAPI.applyTransform({
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        translateX: 0,
+        translateY: 0
+      });
+      log('Transform reset');
+    }
+    
+    function getScreenInfo() {
+      window.electronAPI.getScreenInfo();
+      log('Requesting screen info...');
+    }
+    
+    // Listen for texture updates
+    window.electronAPI.onTextureUpdate((data) => {
+      updateTextureInfo(data);
+    });
+    
+    // Listen for screen info
+    window.electronAPI.onScreenInfo((screens) => {
+      const panel = document.getElementById('screenInfoPanel');
+      const content = document.getElementById('screenInfoContent');
+      
+      panel.style.display = 'block';
+      
+      let html = '';
+      for (const screen of screens) {
+        html += `
+          <div class="info-row">
+            <span class="info-label">Connector ${screen.connectorId}</span>
+            <span class="info-value">${screen.width}x${screen.height} @ ${screen.refreshRate}Hz</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Status</span>
+            <span class="info-value">
+              <span class="status-indicator ${screen.isConnected ? 'status-active' : 'status-inactive'}"></span>
+              ${screen.isConnected ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+        `;
+      }
+      
+      content.innerHTML = html;
+      log(`Received screen info: ${screens.length} screen(s) found`);
+    });
+    
+    // Initial log
+    log('Display window initialized');
+    log('Waiting for texture updates from offscreen renderer...');
+  </script>
+</body>
+</html>

@@ -424,6 +424,25 @@ sudo dnf install libdrm-devel mesa-libgbm-devel systemd-devel
 sudo pacman -S libdrm mesa libsystemd
 ```
 
+## Testing
+
+### Electron Shared Texture Test
+
+A test project demonstrating integration with Electron's offscreen rendering using SharedTexture API.
+
+```bash
+cd test/electron-shared-texture
+npm install
+npm start
+```
+
+This test:
+1. Creates an Electron window with offscreen rendering enabled
+2. Captures the rendered frames as SharedTexture
+3. Uses myde-display to render the texture to a DRM display with transformations
+
+See [test/electron-shared-texture/README.md](test/electron-shared-texture/README.md) for details.
+
 ## License
 
 Apache License 2.0
