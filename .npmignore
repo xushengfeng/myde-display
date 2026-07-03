@@ -1,0 +1,25 @@
+# Source files
+src/
+Cargo.toml
+Cargo.lock
+*.rs
+*.rs.bk
+
+# Build configuration
+tsconfig.json
+vite.config.ts
+
+# Development files
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Rust build artifacts
+target/
+
+# Logs
+*.log
+
+# Environment variables
+.env*

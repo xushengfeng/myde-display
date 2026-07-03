@@ -1,0 +1,30 @@
+[package]
+name = "myde-display"
+version = "0.1.0"
+description = "Node native module for DRM rendering and screen management"
+license = "Apache-2.0"
+edition = "2021"
+exclude = ["index.node"]
+
+[lib]
+name = "myde_display"
+crate-type = ["cdylib"]
+
+[dependencies]
+neon = "1"
+drm = "0.15"
+drm-fourcc = "2.2"
+gbm = "0.18"
+udev = "0.9"
+nalgebra = "0.35"
+image = "0.25"
+anyhow = "1.0"
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.11"
+lazy_static = "1.4"
+uuid = { version = "1.8", features = ["v4"] }
+
+[dependencies.neon]
+version = "1"
+features = ["napi-6"]
