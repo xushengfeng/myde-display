@@ -1,38 +1,42 @@
-# Electron Shared Texture Test
+# Electron Shared Texture Test - Multi-Screen
 
-This test demonstrates how to use Electron's offscreen rendering with `SharedTexture` API and render the output using `myde-display` DRM rendering.
+This test demonstrates how to use Electron's offscreen rendering with `SharedTexture` API and render different regions to multiple screens using `myde-display` DRM rendering.
 
 ## Overview
 
 The test creates:
 1. An **offscreen BrowserWindow** that renders a webpage using GPU-accelerated shared texture
-2. A **display BrowserWindow** that shows the rendering status and controls
-3. Integration with **myde-display** to render the texture to a DRM display
+2. **Multiple display windows** (one per physical display)
+3. Integration with **myde-display** to split and render texture regions to different screens
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Main Process                           │
-│                                                             │
-│  ┌─────────────────┐      ┌─────────────────────────────┐  │
-│  │  OSR Window     │      │  myde-display               │  │
-│  │  (offscreen)    │─────▶│  - DrmDevice                │  │
-│  │                 │      │  - SharedTexture            │  │
-│  │  webPreferences:│      │  - TransformUtil            │  │
-│  │    offscreen:   │      │                             │  │
-│  │      useShared  │      │  Renders to /dev/dri/card0  │  │
-│  │      Texture:   │      └─────────────────────────────┘  │
-│  │      true       │                                        │
-│  └─────────────────┘                                        │
-│           │                                                 │
-│           │ paint event with texture                        │
-│           ▼                                                 │
-│  ┌─────────────────┐                                        │
-│  │ Display Window  │                                        │
-│  │ (shows status)  │                                        │
-│  └─────────────────┘                                        │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                          Main Process                               │
+│                                                                     │
+│  ┌─────────────────┐                                                │
+│  │  OSR Window     │                                                │
+│  │  (offscreen)    │──── paint event with SharedTexture ────┐       │
+│  │  1920x1080      │                                        │       │
+│  └─────────────────┘                                        │       │
+│                                                             ▼       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                    RegionMapper                                │  │
+│  │                                                               │  │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐            │  │
+│  │  │Region 0 │ │Region 1 │ │Region 2 │ │Region 3 │            │  │
+│  │  │ (0,0)   │ │(960,0)  │ │(0,540)  │ │(960,540)│            │  │
+│  │  │ 960x540 │ │ 960x540 │ │ 960x540 │ │ 960x540 │            │  │
+│  │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘            │  │
+│  └───────┼───────────┼───────────┼───────────┼───────────────────┘  │
+│          │           │           │           │                       │
+│          ▼           ▼           ▼           ▼                       │
+│  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐           │
+│  │ Display 0 │ │ Display 1 │ │ Display 2 │ │ Display 3 │           │
+│  │ Screen 0  │ │ Screen 1  │ │ Screen 2  │ │ Screen 3  │           │
+│  └───────────┘ └───────────┘ └───────────┘ └───────────┘           │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Prerequisites
@@ -41,6 +45,7 @@ The test creates:
 - Electron 43.0.0
 - Node.js 18+
 - Access to `/dev/dri/card*` (video group)
+- Multiple monitors (optional, works with single monitor too)
 
 ## Installation
 
@@ -55,124 +60,160 @@ npm install
 npm start
 ```
 
-## How It Works
+## Mapping Modes
 
-### 1. Offscreen Rendering with Shared Texture
+### 1. Single Screen
+Renders the entire texture to the first screen.
 
 ```javascript
-const osrWindow = new BrowserWindow({
-  webPreferences: {
-    offscreen: {
-      useSharedTexture: true  // Enable GPU shared texture
-    }
-  }
-});
+mapper.addCustomRegion(0, 0, width, height, 0);
 ```
 
-### 2. Paint Event Handler
+### 2. Horizontal Split
+Splits the texture horizontally across all screens.
 
 ```javascript
-osrWindow.webContents.on('paint', (event, dirty, texture) => {
-  // texture.textureInfo contains the SharedTextureImportTextureInfo
-  // texture.textureInfo.handle contains SharedTextureHandle
-  // texture.textureInfo.handle.nativePixmap contains NativePixmap (Linux)
-});
+mapper.addHorizontalSplit(width, height, [
+  { screenId: 0 },
+  { screenId: 1 },
+  // ...
+]);
 ```
 
-### 3. NativePixmap Structure (Linux)
+### 3. Vertical Split
+Splits the texture vertically across all screens.
 
 ```javascript
-{
-  planes: [
-    {
-      stride: number,  // Stride in bytes
-      offset: number,  // Offset in bytes
-      size: number,    // Plane size in bytes
-      fd: number       // DMA-BUF file descriptor
-    }
-  ],
-  modifier: string,    // DRM format modifier
-  supportsZeroCopyWebGpuImport: boolean
+mapper.addVerticalSplit(width, height, [
+  { screenId: 0 },
+  { screenId: 1 },
+  // ...
+]);
+```
+
+### 4. Grid (2x2)
+Splits the texture into a 2x2 grid.
+
+```javascript
+mapper.addGridMapping(width, height, 2, 2, [
+  { screenId: 0 },
+  { screenId: 1 },
+  { screenId: 2 },
+  { screenId: 3 },
+]);
+```
+
+### 5. Custom Regions
+Define custom source regions with individual transforms.
+
+```javascript
+mapper.addCustomRegion(
+  0, 0,                    // Source position
+  width / 2, height / 2,  // Source size
+  0,                       // Target screen
+  TransformUtil.rotation(Math.PI / 4)  // Transform
+);
+```
+
+## API Reference
+
+### RegionMapper
+
+#### Methods
+
+- `addMapping(sourceRect, target, transform)` - Add a region mapping
+- `addGridMapping(sourceWidth, sourceHeight, columns, rows, screens, transforms)` - Add grid mapping
+- `addHorizontalSplit(sourceWidth, sourceHeight, screens, transforms)` - Add horizontal split
+- `addVerticalSplit(sourceWidth, sourceHeight, screens, transforms)` - Add vertical split
+- `addCustomRegion(x, y, width, height, screenId, transform)` - Add custom region
+- `getMappings()` - Get all mappings
+- `clear()` - Clear all mappings
+
+### RegionMapping
+
+```typescript
+interface RegionMapping {
+  sourceRect: Rectangle;      // Source region in texture
+  target: ScreenTarget;       // Target screen
+  transform?: Transform;      // Optional transform
+}
+
+interface Rectangle {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface ScreenTarget {
+  screenId: number;
+  connectorId?: number;
+  destX?: number;
+  destY?: number;
+  destWidth?: number;
+  destHeight?: number;
 }
 ```
-
-### 4. Rendering with myde-display
-
-```javascript
-const { DrmDevice, SharedTexture, TransformUtil } = require('myde-display');
-
-// Create DRM device
-const device = new DrmDevice('/dev/dri/card0');
-
-// Create SharedTexture from Electron's texture info
-const texture = SharedTexture.fromNativePixmap(
-  textureInfo.handle.nativePixmap,
-  textureInfo.codedSize.width,
-  textureInfo.codedSize.height,
-  textureInfo.pixelFormat
-);
-
-// Apply transformations
-const transform = TransformUtil.rotation(Math.PI / 4);
-
-// Render to DRM display
-device.renderSharedTexture(texture.getTextureInfo(), transform);
-```
-
-## Supported Pixel Formats
-
-- `bgra` - 32bpp BGRA (byte-order), 1 plane
-- `rgba` - 32bpp RGBA (byte-order), 1 plane
-- `rgbaf16` - Half float RGBA, 1 plane
-- `nv12` - 12bpp with Y plane followed by a 2x2 interleaved UV plane
-- `nv16` - 16bpp with Y plane followed by a 2x1 interleaved UV plane
-- `p010le` - 4:2:0 10-bit YUV (little-endian)
-
-## Transformations
-
-The `TransformUtil` supports:
-
-- **Rotation**: Arbitrary angle rotation (not just 90° multiples)
-- **Scaling**: Non-uniform scaling (different X/Y factors)
-- **Translation**: Moving the texture position
-- **Composition**: Combining multiple transforms
 
 ## Controls
 
 The display window provides buttons to:
-- Rotate texture 45°
-- Scale texture 1.5x
-- Reset transform
-- Get screen information
+- **Single**: Render full texture to single screen
+- **Horizontal Split**: Split texture across screens horizontally
+- **Vertical Split**: Split texture across screens vertically
+- **Grid (2x2)**: Split texture into 2x2 grid
+- **Custom Regions**: Apply custom regions with transforms
+
+## Transformations
+
+Each region can have its own transform:
+
+```typescript
+// Rotate region 45 degrees
+const rotation = TransformUtil.rotation(Math.PI / 4, originX, originY);
+
+// Scale region
+const scale = TransformUtil.scale(1.5, 1.5);
+
+// Translate region
+const translation = TransformUtil.translation(x, y);
+
+// Flip region
+const flip = TransformUtil.flip(true, false); // horizontal flip
+
+// Compose multiple transforms
+const combined = TransformUtil.compose(translation, scale, rotation);
+```
 
 ## Troubleshooting
 
-### No Texture Received
+### Only One Screen Detected
 
-If the paint event doesn't receive a texture:
-1. Ensure GPU acceleration is available
-2. Check that `useSharedTexture: true` is set
-3. Verify the webpage is loading correctly
+If only one screen is detected:
+1. Connect additional monitors
+2. Configure displays in system settings
+3. The example will still work with single screen mode
 
-### DRM Rendering Fails
+### Regions Not Rendering
 
-If DRM rendering fails:
-1. Check permissions on `/dev/dri/card*`
-2. Ensure a display is connected
-3. Verify the pixel format is supported
+If regions are not rendering correctly:
+1. Check that source regions are within texture bounds
+2. Verify screen IDs are valid
+3. Check console for error messages
 
 ### Performance Issues
 
 - Reduce frame rate: `osrWindow.webContents.setFrameRate(30)`
 - Use simpler webpages for testing
-- Ensure the DRM device supports the requested resolution
+- Reduce texture resolution
 
 ## Notes
 
-- The offscreen window is always created as frameless
-- Only the dirty area is passed to the paint event
-- When nothing is happening on the webpage, no frames are generated
-- The shared texture must be released after use
+- Source regions must be within texture bounds
+- Each region can target any screen
+- Transforms are applied per-region
+- The texture is released after each frame
+- Multiple regions can target the same screen
 
 ## References
 

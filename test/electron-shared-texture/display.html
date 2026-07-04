@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DRM Rendered Output</title>
+  <title>DRM Multi-Screen Rendered Output</title>
   <style>
     * {
       margin: 0;
@@ -107,6 +107,10 @@
       background: #009950;
     }
     
+    button.active {
+      background: #ff6600;
+    }
+    
     .log-panel {
       background: #2a2a2a;
       border-radius: 8px;
@@ -174,11 +178,57 @@
       font-family: monospace;
       font-size: 12px;
     }
+    
+    .mode-buttons {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    
+    .mode-button {
+      padding: 15px;
+      text-align: center;
+    }
+    
+    .mode-button.active {
+      background: #ff6600;
+      color: #fff;
+    }
+    
+    .displays-info {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    
+    .display-card {
+      background: #333;
+      border-radius: 8px;
+      padding: 10px;
+      border: 2px solid transparent;
+    }
+    
+    .display-card.active {
+      border-color: #00ff88;
+    }
+    
+    .display-card h3 {
+      color: #00ff88;
+      font-size: 12px;
+      margin-bottom: 5px;
+    }
+    
+    .display-card .resolution {
+      font-size: 18px;
+      font-weight: bold;
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>🖥️ DRM Rendered Output</h1>
+    <h1>🖥️ DRM Multi-Screen Renderer</h1>
     
     <div class="info-panel">
       <h2>System Status</h2>
@@ -201,6 +251,10 @@
         <span class="info-label">Frames Rendered</span>
         <span class="info-value" id="frameCount">0</span>
       </div>
+      <div class="info-row">
+        <span class="info-label">Current Mapping Mode</span>
+        <span class="info-value" id="mappingMode">Single Screen</span>
+      </div>
     </div>
     
     <div class="texture-info">
@@ -219,16 +273,30 @@
       </div>
     </div>
     
-    <div class="controls">
-      <button onclick="rotateTexture()">Rotate 45°</button>
-      <button onclick="scaleTexture()">Scale 1.5x</button>
-      <button onclick="resetTransform()">Reset Transform</button>
-      <button onclick="getScreenInfo()">Get Screen Info</button>
+    <div class="info-panel">
+      <h2>Connected Displays</h2>
+      <div class="displays-info" id="displaysInfo">
+        <div class="display-card active">
+          <h3>Display 0</h3>
+          <div class="resolution">1920x1080</div>
+        </div>
+      </div>
     </div>
     
-    <div class="info-panel" id="screenInfoPanel" style="display: none;">
-      <h2>Screen Information</h2>
-      <div id="screenInfoContent"></div>
+    <div class="info-panel">
+      <h2>Mapping Mode</h2>
+      <div class="mode-buttons">
+        <button class="mode-button active" onclick="setMappingMode('single')">Single</button>
+        <button class="mode-button" onclick="setMappingMode('horizontal')">Horizontal Split</button>
+        <button class="mode-button" onclick="setMappingMode('vertical')">Vertical Split</button>
+        <button class="mode-button" onclick="setMappingMode('grid')">Grid (2x2)</button>
+        <button class="mode-button" onclick="setMappingMode('custom')">Custom Regions</button>
+      </div>
+    </div>
+    
+    <div class="controls">
+      <button onclick="getScreenInfo()">Refresh Screen Info</button>
+      <button onclick="resetStats()">Reset Statistics</button>
     </div>
     
     <div class="log-panel">
@@ -239,8 +307,7 @@
   
   <script>
     let frameCount = 0;
-    let currentRotation = 0;
-    let currentScale = 1.0;
+    let currentMode = 'single';
     
     // Logging function
     function log(message, type = 'info') {
@@ -272,49 +339,68 @@
         document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
       }
       
-      log(`Frame ${frameCount} received: ${data.dirty ? JSON.stringify(data.dirty) : 'full frame'}`);
+      if (data.mappingMode) {
+        document.getElementById('mappingMode').textContent = getModeName(data.mappingMode);
+      }
     }
     
-    // Transform controls
-    function rotateTexture() {
-      currentRotation += Math.PI / 4; // 45 degrees
-      const transform = {
-        rotation: currentRotation,
-        originX: 400,
-        originY: 300
+    function getModeName(mode) {
+      const names = {
+        'single': 'Single Screen',
+        'horizontal': 'Horizontal Split',
+        'vertical': 'Vertical Split',
+        'grid': 'Grid (2x2)',
+        'custom': 'Custom Regions'
       };
-      window.electronAPI.applyTransform(transform);
-      log(`Rotation applied: ${(currentRotation * 180 / Math.PI).toFixed(1)}°`);
+      return names[mode] || mode;
     }
     
-    function scaleTexture() {
-      currentScale = currentScale === 1.0 ? 1.5 : 1.0;
-      const transform = {
-        scaleX: currentScale,
-        scaleY: currentScale,
-        originX: 400,
-        originY: 300
-      };
-      window.electronAPI.applyTransform(transform);
-      log(`Scale applied: ${currentScale}x`);
-    }
-    
-    function resetTransform() {
-      currentRotation = 0;
-      currentScale = 1.0;
-      window.electronAPI.applyTransform({
-        rotation: 0,
-        scaleX: 1,
-        scaleY: 1,
-        translateX: 0,
-        translateY: 0
+    // Set mapping mode
+    function setMappingMode(mode) {
+      currentMode = mode;
+      window.electronAPI.setMappingMode(mode);
+      
+      // Update button states
+      document.querySelectorAll('.mode-button').forEach(btn => {
+        btn.classList.remove('active');
       });
-      log('Transform reset');
+      event.target.classList.add('active');
+      
+      document.getElementById('mappingMode').textContent = getModeName(mode);
+      log(`Mapping mode changed to: ${getModeName(mode)}`);
     }
     
+    // Get screen info
     function getScreenInfo() {
       window.electronAPI.getScreenInfo();
       log('Requesting screen info...');
+    }
+    
+    // Reset statistics
+    function resetStats() {
+      frameCount = 0;
+      document.getElementById('frameCount').textContent = '0';
+      log('Statistics reset');
+    }
+    
+    // Update displays info
+    function updateDisplaysInfo(displays) {
+      const container = document.getElementById('displaysInfo');
+      container.innerHTML = '';
+      
+      displays.forEach((display, i) => {
+        const card = document.createElement('div');
+        card.className = 'display-card';
+        card.innerHTML = `
+          <h3>Display ${i}</h3>
+          <div class="resolution">${display.bounds.width}x${display.bounds.height}</div>
+          <div style="font-size: 12px; color: #888;">
+            Position: (${display.bounds.x}, ${display.bounds.y})<br>
+            Scale: ${display.scaleFactor}x
+          </div>
+        `;
+        container.appendChild(card);
+      });
     }
     
     // Listen for texture updates
@@ -324,30 +410,8 @@
     
     // Listen for screen info
     window.electronAPI.onScreenInfo((screens) => {
-      const panel = document.getElementById('screenInfoPanel');
-      const content = document.getElementById('screenInfoContent');
-      
-      panel.style.display = 'block';
-      
-      let html = '';
-      for (const screen of screens) {
-        html += `
-          <div class="info-row">
-            <span class="info-label">Connector ${screen.connectorId}</span>
-            <span class="info-value">${screen.width}x${screen.height} @ ${screen.refreshRate}Hz</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">Status</span>
-            <span class="info-value">
-              <span class="status-indicator ${screen.isConnected ? 'status-active' : 'status-inactive'}"></span>
-              ${screen.isConnected ? 'Connected' : 'Disconnected'}
-            </span>
-          </div>
-        `;
-      }
-      
-      content.innerHTML = html;
-      log(`Received screen info: ${screens.length} screen(s) found`);
+      updateDisplaysInfo(screens);
+      log(`Received screen info: ${screens.length} display(s) found`);
     });
     
     // Initial log

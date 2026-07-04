@@ -8,6 +8,9 @@ import type {
   NativePixmap,
   SharedTexturePlane,
   PixelFormat,
+  Rectangle,
+  ScreenTarget,
+  RegionMapping,
   TransformOptions,
   Transform,
   Point,
@@ -46,8 +49,60 @@ export class DrmDevice {
     addon.renderBufferToScreen(this.handle, buffer, width, height, pixelFormat, transform);
   }
 
+  renderRegion(
+    textureInfo: SharedTextureImportTextureInfo,
+    sourceRect: Rectangle,
+    destRect: Rectangle,
+    transform?: Transform
+  ): void {
+    addon.renderRegionToScreen(this.handle, textureInfo, sourceRect, destRect, transform);
+  }
+
   getHandle(): DrmDeviceHandle {
     return this.handle;
+  }
+}
+
+export class MultiScreenRenderer {
+  private devices: Map<string, DrmDevice> = new Map();
+
+  addDevice(devicePath: string): DrmDevice {
+    if (!this.devices.has(devicePath)) {
+      const device = new DrmDevice(devicePath);
+      this.devices.set(devicePath, device);
+    }
+    return this.devices.get(devicePath)!;
+  }
+
+  removeDevice(devicePath: string): void {
+    const device = this.devices.get(devicePath);
+    if (device) {
+      device.close();
+      this.devices.delete(devicePath);
+    }
+  }
+
+  getDevice(devicePath: string): DrmDevice | undefined {
+    return this.devices.get(devicePath);
+  }
+
+  getAllDevices(): DrmDevice[] {
+    return Array.from(this.devices.values());
+  }
+
+  renderToMultipleScreens(
+    textureInfo: SharedTextureImportTextureInfo,
+    mappings: RegionMapping[]
+  ): void {
+    const handles = Array.from(this.devices.values()).map(d => d.getHandle());
+    addon.renderMultiScreen(handles, textureInfo, mappings);
+  }
+
+  closeAll(): void {
+    for (const device of this.devices.values()) {
+      device.close();
+    }
+    this.devices.clear();
   }
 }
 
@@ -114,6 +169,133 @@ export class SharedTexture {
   }
 }
 
+export class RegionMapper {
+  private mappings: RegionMapping[] = [];
+
+  addMapping(
+    sourceRect: Rectangle,
+    target: ScreenTarget,
+    transform?: Transform
+  ): this {
+    this.mappings.push({
+      sourceRect,
+      target,
+      transform,
+    });
+    return this;
+  }
+
+  addGridMapping(
+    sourceWidth: number,
+    sourceHeight: number,
+    columns: number,
+    rows: number,
+    screens: ScreenTarget[],
+    transforms?: Transform[]
+  ): this {
+    const cellWidth = sourceWidth / columns;
+    const cellHeight = sourceHeight / rows;
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < columns; col++) {
+        const index = row * columns + col;
+        if (index >= screens.length) break;
+
+        const sourceRect: Rectangle = {
+          x: col * cellWidth,
+          y: row * cellHeight,
+          width: cellWidth,
+          height: cellHeight,
+        };
+
+        this.mappings.push({
+          sourceRect,
+          target: screens[index],
+          transform: transforms?.[index],
+        });
+      }
+    }
+
+    return this;
+  }
+
+  addHorizontalSplit(
+    sourceWidth: number,
+    sourceHeight: number,
+    screens: ScreenTarget[],
+    transforms?: Transform[]
+  ): this {
+    const segmentWidth = sourceWidth / screens.length;
+
+    for (let i = 0; i < screens.length; i++) {
+      const sourceRect: Rectangle = {
+        x: i * segmentWidth,
+        y: 0,
+        width: segmentWidth,
+        height: sourceHeight,
+      };
+
+      this.mappings.push({
+        sourceRect,
+        target: screens[i],
+        transform: transforms?.[i],
+      });
+    }
+
+    return this;
+  }
+
+  addVerticalSplit(
+    sourceWidth: number,
+    sourceHeight: number,
+    screens: ScreenTarget[],
+    transforms?: Transform[]
+  ): this {
+    const segmentHeight = sourceHeight / screens.length;
+
+    for (let i = 0; i < screens.length; i++) {
+      const sourceRect: Rectangle = {
+        x: 0,
+        y: i * segmentHeight,
+        width: sourceWidth,
+        height: segmentHeight,
+      };
+
+      this.mappings.push({
+        sourceRect,
+        target: screens[i],
+        transform: transforms?.[i],
+      });
+    }
+
+    return this;
+  }
+
+  addCustomRegion(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    screenId: number,
+    transform?: Transform
+  ): this {
+    this.mappings.push({
+      sourceRect: { x, y, width, height },
+      target: { screenId },
+      transform,
+    });
+    return this;
+  }
+
+  getMappings(): RegionMapping[] {
+    return [...this.mappings];
+  }
+
+  clear(): void {
+    this.mappings = [];
+  }
+}
+
 export class TransformUtil {
   static create(options: TransformOptions): Transform {
     return addon.createTransform(options);
@@ -150,6 +332,20 @@ export class TransformUtil {
       translateY: y,
     });
   }
+
+  static flip(horizontal: boolean = false, vertical: boolean = false): Transform {
+    return addon.createTransform({
+      scaleX: horizontal ? -1 : 1,
+      scaleY: vertical ? -1 : 1,
+    });
+  }
+
+  static crop(x: number, y: number, width: number, height: number): Transform {
+    return addon.createTransform({
+      translateX: -x,
+      translateY: -y,
+    });
+  }
 }
 
 export function getScreenInfo(devicePath?: string): ScreenInfo[] {
@@ -159,6 +355,22 @@ export function getScreenInfo(devicePath?: string): ScreenInfo[] {
   } finally {
     device.close();
   }
+}
+
+export function getAllScreens(): Map<string, ScreenInfo[]> {
+  const screensMap = new Map<string, ScreenInfo[]>();
+  const devices = listDrmDevices();
+  
+  for (const devicePath of devices) {
+    try {
+      const screens = getScreenInfo(devicePath);
+      screensMap.set(devicePath, screens);
+    } catch (error) {
+      // Skip devices that can't be opened
+    }
+  }
+  
+  return screensMap;
 }
 
 export function listDrmDevices(): string[] {
@@ -181,6 +393,28 @@ export function listDrmDevices(): string[] {
   return devices;
 }
 
+export function createRegionMapping(
+  sourceX: number,
+  sourceY: number,
+  sourceWidth: number,
+  sourceHeight: number,
+  screenId: number,
+  transform?: Transform
+): RegionMapping {
+  return {
+    sourceRect: {
+      x: sourceX,
+      y: sourceY,
+      width: sourceWidth,
+      height: sourceHeight,
+    },
+    target: {
+      screenId,
+    },
+    transform,
+  };
+}
+
 export type {
   DrmDeviceHandle,
   ScreenInfo,
@@ -189,6 +423,9 @@ export type {
   NativePixmap,
   SharedTexturePlane,
   PixelFormat,
+  Rectangle,
+  ScreenTarget,
+  RegionMapping,
   TransformOptions,
   Transform,
   Point,
@@ -199,9 +436,13 @@ export { BlendMode };
 
 export default {
   DrmDevice,
+  MultiScreenRenderer,
   SharedTexture,
+  RegionMapper,
   TransformUtil,
   getScreenInfo,
+  getAllScreens,
   listDrmDevices,
+  createRegionMapping,
   BlendMode,
 };

@@ -15,6 +15,7 @@
     "postinstall": "npm run build:ts",
     "example:basic": "npx tsx examples/basic.ts",
     "example:animation": "npx tsx examples/animation.ts",
+    "example:multi-screen": "npx tsx examples/multi-screen.ts",
     "test:structure": "npx tsx test/structure.ts"
   },
   "keywords": [

@@ -71,6 +71,21 @@ pub struct SharedTextureHandle {
     pub nativePixmap: Option<NativePixmap>,
 }
 
+pub struct SharedTextureImportTextureInfo {
+    pub pixel_format: PixelFormat,
+    pub coded_width: u32,
+    pub coded_height: u32,
+    pub visible_rect: Option<Rectangle>,
+    pub handle: SharedTextureHandle,
+}
+
+pub struct Rectangle {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub enum PixelFormat {
     Bgra,
     Rgba,
@@ -220,14 +235,17 @@ impl DrmRenderer {
 
     pub fn render_shared_texture(
         &mut self,
-        handle: &SharedTextureHandle,
-        width: u32,
-        height: u32,
-        pixel_format: PixelFormat,
+        texture_info: &SharedTextureImportTextureInfo,
         transform: Option<[f64; 9]>,
     ) -> Result<()> {
-        if let Some(native_pixmap) = &handle.nativePixmap {
-            self.render_native_pixmap(native_pixmap, width, height, pixel_format, transform)
+        if let Some(native_pixmap) = &texture_info.handle.nativePixmap {
+            self.render_native_pixmap(
+                native_pixmap,
+                texture_info.coded_width,
+                texture_info.coded_height,
+                texture_info.pixel_format,
+                transform,
+            )
         } else {
             Err(anyhow!("No valid texture handle provided"))
         }
@@ -379,6 +397,169 @@ impl DrmRenderer {
                                     dst[dst_offset] = plane[src_offset as usize];
                                     dst[dst_offset + 1] = plane[src_offset as usize];
                                     dst[dst_offset + 2] = plane[src_offset as usize];
+                                    dst[dst_offset + 3] = 255;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn render_region(
+        &mut self,
+        texture_info: &SharedTextureImportTextureInfo,
+        source_rect: &Rectangle,
+        dest_rect: &Rectangle,
+        transform: Option<[f64; 9]>,
+    ) -> Result<()> {
+        let connector = self.current_connector.ok_or_else(|| anyhow!("No connector"))?;
+        let crtc = self.current_crtc.ok_or_else(|| anyhow!("No CRTC"))?;
+        let mode = self.current_mode.ok_or_else(|| anyhow!("No mode"))?;
+        
+        let (screen_width, screen_height) = (mode.hdisplay() as u32, mode.vdisplay() as u32);
+        
+        // Validate source rect
+        let src_x = source_rect.x.min(texture_info.coded_width);
+        let src_y = source_rect.y.min(texture_info.coded_height);
+        let src_width = source_rect.width.min(texture_info.coded_width - src_x);
+        let src_height = source_rect.height.min(texture_info.coded_height - src_y);
+        
+        // Validate dest rect
+        let dst_x = dest_rect.x.min(screen_width);
+        let dst_y = dest_rect.y.min(screen_height);
+        let dst_width = dest_rect.width.min(screen_width - dst_x);
+        let dst_height = dest_rect.height.min(screen_height - dst_y);
+        
+        let mut buffer = self.gbm.create_buffer_object::<()>(
+            screen_width,
+            screen_height,
+            gbm::Format::Xrgb8888,
+            gbm::BufferObjectFlags::SCANOUT | gbm::BufferObjectFlags::WRITE,
+        )?;
+        
+        {
+            let mut mapping = buffer.map_mut(&self.gbm)?;
+            let mapping_slice = mapping.as_mut();
+            
+            // Clear buffer
+            for pixel in mapping_slice.chunks_exact_mut(4) {
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 0;
+                pixel[3] = 0;
+            }
+            
+            // If we have a native pixmap, map and render the region
+            if let Some(native_pixmap) = &texture_info.handle.native_pixmap {
+                let plane_data = self.map_dma_buf_planes(native_pixmap)?;
+                
+                self.render_region_from_mapped_data(
+                    mapping_slice,
+                    &plane_data,
+                    src_x,
+                    src_y,
+                    src_width,
+                    src_height,
+                    dst_x,
+                    dst_y,
+                    dst_width,
+                    dst_height,
+                    texture_info.coded_width,
+                    texture_info.coded_height,
+                    screen_width,
+                    screen_height,
+                    &texture_info.pixel_format,
+                    transform,
+                );
+            }
+        }
+        
+        let framebuffer = self.gbm.add_framebuffer(&buffer, 32, 32)?;
+        
+        self.device.set_crtc(
+            crtc,
+            Some(framebuffer),
+            (0, 0),
+            &[connector],
+            Some(mode),
+        )?;
+        
+        Ok(())
+    }
+
+    fn render_region_from_mapped_data(
+        &self,
+        dst: &mut [u8],
+        plane_data: &[Vec<u8>],
+        src_x: u32,
+        src_y: u32,
+        src_width: u32,
+        src_height: u32,
+        dst_x: u32,
+        dst_y: u32,
+        dst_width: u32,
+        dst_height: u32,
+        full_src_width: u32,
+        full_src_height: u32,
+        full_dst_width: u32,
+        full_dst_height: u32,
+        pixel_format: &PixelFormat,
+        transform: Option<[f64; 9]>,
+    ) {
+        let bytes_per_pixel = match pixel_format {
+            PixelFormat::Bgra | PixelFormat::Rgba => 4,
+            PixelFormat::RgbaF16 => 8,
+            PixelFormat::Nv12 | PixelFormat::Nv16 => 1,
+            PixelFormat::P010Le => 2,
+        };
+        
+        if let Some(plane) = plane_data.first() {
+            for y in 0..dst_height {
+                for x in 0..dst_width {
+                    // Map destination pixel to source pixel
+                    let (mapped_x, mapped_y) = if let Some(matrix) = transform {
+                        self.apply_transform_to_point(matrix, x as f64, y as f64)
+                    } else {
+                        // Scale from destination region to source region
+                        let scale_x = src_width as f64 / dst_width as f64;
+                        let scale_y = src_height as f64 / dst_height as f64;
+                        (x as f64 * scale_x, y as f64 * scale_y)
+                    };
+                    
+                    // Add source offset
+                    let src_pixel_x = (mapped_x + src_x as f64) as i32;
+                    let src_pixel_y = (mapped_y + src_y as f64) as i32;
+                    
+                    // Check bounds
+                    if src_pixel_x >= 0 && src_pixel_x < full_src_width as i32 &&
+                       src_pixel_y >= 0 && src_pixel_y < full_src_height as i32 {
+                        let src_offset = ((src_pixel_y as u32 * full_src_width + src_pixel_x as u32) * bytes_per_pixel) as usize;
+                        
+                        // Calculate destination position
+                        let dst_pixel_x = dst_x + x;
+                        let dst_pixel_y = dst_y + y;
+                        let dst_offset = ((dst_pixel_y * full_dst_width + dst_pixel_x) * 4) as usize;
+                        
+                        if src_offset + bytes_per_pixel as usize <= plane.len() && dst_offset + 3 < dst.len() {
+                            match pixel_format {
+                                PixelFormat::Rgba => {
+                                    dst[dst_offset] = plane[src_offset];
+                                    dst[dst_offset + 1] = plane[src_offset + 1];
+                                    dst[dst_offset + 2] = plane[src_offset + 2];
+                                    dst[dst_offset + 3] = plane[src_offset + 3];
+                                }
+                                PixelFormat::Bgra => {
+                                    dst[dst_offset] = plane[src_offset + 2];
+                                    dst[dst_offset + 1] = plane[src_offset + 1];
+                                    dst[dst_offset + 2] = plane[src_offset];
+                                    dst[dst_offset + 3] = plane[src_offset + 3];
+                                }
+                                _ => {
+                                    dst[dst_offset] = plane[src_offset];
+                                    dst[dst_offset + 1] = plane[src_offset];
+                                    dst[dst_offset + 2] = plane[src_offset];
                                     dst[dst_offset + 3] = 255;
                                 }
                             }

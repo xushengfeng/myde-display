@@ -25,12 +25,46 @@ export interface SharedTextureImportTextureInfo {
   handle: SharedTextureHandle;
 }
 
+export interface Rectangle {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ScreenTarget {
+  screenId: number;
+  connectorId?: number;
+  destX?: number;
+  destY?: number;
+  destWidth?: number;
+  destHeight?: number;
+}
+
+export interface RegionMapping {
+  sourceRect: Rectangle;
+  target: ScreenTarget;
+  transform?: Transform;
+}
+
 export interface NativeModule {
   openDrmDevice(devicePath?: string): DrmDeviceHandle;
   closeDrmDevice(handle: DrmDeviceHandle): void;
   getScreenInfo(handle: DrmDeviceHandle): ScreenInfo[];
   renderToScreen(handle: DrmDeviceHandle, textureInfo: SharedTextureImportTextureInfo, transform?: Transform): void;
   renderBufferToScreen(handle: DrmDeviceHandle, buffer: Buffer, width: number, height: number, pixelFormat: PixelFormat, transform?: Transform): void;
+  renderRegionToScreen(
+    handle: DrmDeviceHandle,
+    textureInfo: SharedTextureImportTextureInfo,
+    sourceRect: Rectangle,
+    destRect: Rectangle,
+    transform?: Transform
+  ): void;
+  renderMultiScreen(
+    deviceHandles: DrmDeviceHandle[],
+    textureInfo: SharedTextureImportTextureInfo,
+    mappings: RegionMapping[]
+  ): void;
   createTransform(options: TransformOptions): Transform;
   applyTransform(transform: Transform, point: Point): Point;
   composeTransforms(...transforms: Transform[]): Transform;

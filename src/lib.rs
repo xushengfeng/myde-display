@@ -20,6 +20,70 @@ lazy_static::lazy_static! {
         Mutex::new(TransformManager::new());
 }
 
+#[derive(Clone)]
+struct SharedTexturePlane {
+    stride: u32,
+    offset: u64,
+    size: u64,
+    fd: i32,
+}
+
+#[derive(Clone)]
+struct NativePixmap {
+    planes: Vec<SharedTexturePlane>,
+    modifier: String,
+    supports_zero_copy_webgpu_import: bool,
+}
+
+#[derive(Clone)]
+struct SharedTextureHandle {
+    native_pixmap: Option<NativePixmap>,
+}
+
+#[derive(Clone)]
+struct SharedTextureImportTextureInfo {
+    pixel_format: PixelFormat,
+    coded_width: u32,
+    coded_height: u32,
+    visible_rect: Option<Rectangle>,
+    handle: SharedTextureHandle,
+}
+
+#[derive(Clone)]
+struct Rectangle {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone)]
+struct ScreenTarget {
+    screen_id: u32,
+    connector_id: Option<u32>,
+    dest_x: Option<u32>,
+    dest_y: Option<u32>,
+    dest_width: Option<u32>,
+    dest_height: Option<u32>,
+}
+
+#[derive(Clone)]
+struct RegionMapping {
+    source_rect: Rectangle,
+    target: ScreenTarget,
+    transform: Option<[f64; 9]>,
+}
+
+#[derive(Clone, Copy)]
+enum PixelFormat {
+    Bgra,
+    Rgba,
+    RgbaF16,
+    Nv12,
+    Nv16,
+    P010Le,
+}
+
 fn open_drm_device(mut cx: FunctionContext) -> JsResult<JsObject> {
     let device_path = cx.argument_opt(0)
         .and_then(|v| v.downcast::<JsString, _>(&mut cx).ok())
@@ -148,8 +212,50 @@ fn get_screen_info(mut cx: FunctionContext) -> JsResult<JsArray> {
     Ok(js_array)
 }
 
+fn parse_rectangle(cx: &mut FunctionContext, obj: JsObject) -> NeonResult<Rectangle> {
+    let x = obj.get::<JsNumber, _, _>(cx, "x")?.value(cx) as u32;
+    let y = obj.get::<JsNumber, _, _>(cx, "y")?.value(cx) as u32;
+    let width = obj.get::<JsNumber, _, _>(cx, "width")?.value(cx) as u32;
+    let height = obj.get::<JsNumber, _, _>(cx, "height")?.value(cx) as u32;
+    
+    Ok(Rectangle { x, y, width, height })
+}
+
+fn parse_screen_target(cx: &mut FunctionContext, obj: JsObject) -> NeonResult<ScreenTarget> {
+    let screen_id = obj.get::<JsNumber, _, _>(cx, "screenId")?.value(cx) as u32;
+    let connector_id = obj.get_opt::<JsNumber, _, _>(cx, "connectorId")?
+        .map(|v| v.value(cx) as u32);
+    let dest_x = obj.get_opt::<JsNumber, _, _>(cx, "destX")?
+        .map(|v| v.value(cx) as u32);
+    let dest_y = obj.get_opt::<JsNumber, _, _>(cx, "destY")?
+        .map(|v| v.value(cx) as u32);
+    let dest_width = obj.get_opt::<JsNumber, _, _>(cx, "destWidth")?
+        .map(|v| v.value(cx) as u32);
+    let dest_height = obj.get_opt::<JsNumber, _, _>(cx, "destHeight")?
+        .map(|v| v.value(cx) as u32);
+    
+    Ok(ScreenTarget {
+        screen_id,
+        connector_id,
+        dest_x,
+        dest_y,
+        dest_width,
+        dest_height,
+    })
+}
+
+fn parse_transform_matrix(cx: &mut FunctionContext, transform_obj: JsObject) -> NeonResult<Option<[f64; 9]>> {
+    let matrix = transform_obj.get::<JsArray, _, _>(cx, "matrix")?;
+    let mut transform_matrix = [0.0f64; 9];
+    for i in 0..9 {
+        let val = matrix.get::<JsNumber, _, _>(cx, i as u32)?;
+        transform_matrix[i] = val.value(cx);
+    }
+    Ok(Some(transform_matrix))
+}
+
 fn parse_shared_texture_handle(cx: &mut FunctionContext, handle_obj: JsObject) -> NeonResult<SharedTextureHandle> {
-    let mut handle = SharedTextureHandle::default();
+    let mut handle = SharedTextureHandle { native_pixmap: None };
     
     if let Ok(native_pixmap) = handle_obj.get::<JsObject, _, _>(cx, "nativePixmap") {
         let planes_array = native_pixmap.get::<JsArray, _, _>(cx, "planes")?;
@@ -174,14 +280,48 @@ fn parse_shared_texture_handle(cx: &mut FunctionContext, handle_obj: JsObject) -
         let modifier = native_pixmap.get::<JsString, _, _>(cx, "modifier")?.value(cx);
         let supports_zero_copy = native_pixmap.get::<JsBoolean, _, _>(cx, "supportsZeroCopyWebGpuImport")?.value(cx);
         
-        handle.nativePixmap = Some(NativePixmap {
+        handle.native_pixmap = Some(NativePixmap {
             planes,
             modifier,
-            supportsZeroCopyWebGpuImport: supports_zero_copy,
+            supports_zero_copy_webgpu_import: supports_zero_copy,
         });
     }
     
     Ok(handle)
+}
+
+fn parse_texture_info(cx: &mut FunctionContext, texture_info: JsObject) -> NeonResult<SharedTextureImportTextureInfo> {
+    let pixel_format_str = texture_info.get::<JsString, _, _>(cx, "pixelFormat")?.value(cx);
+    let coded_size = texture_info.get::<JsObject, _, _>(cx, "codedSize")?;
+    let width = coded_size.get::<JsNumber, _, _>(cx, "width")?.value(cx) as u32;
+    let height = coded_size.get::<JsNumber, _, _>(cx, "height")?.value(cx) as u32;
+    
+    let visible_rect = if let Ok(rect) = texture_info.get::<JsObject, _, _>(cx, "visibleRect") {
+        Some(parse_rectangle(cx, rect)?)
+    } else {
+        None
+    };
+    
+    let handle_obj = texture_info.get::<JsObject, _, _>(cx, "handle")?;
+    let handle = parse_shared_texture_handle(cx, handle_obj)?;
+    
+    let pixel_format = match pixel_format_str.as_str() {
+        "bgra" => PixelFormat::Bgra,
+        "rgba" => PixelFormat::Rgba,
+        "rgbaf16" => PixelFormat::RgbaF16,
+        "nv12" => PixelFormat::Nv12,
+        "nv16" => PixelFormat::Nv16,
+        "p010le" => PixelFormat::P010Le,
+        _ => return cx.throw_error(format!("Unsupported pixel format: {}", pixel_format_str)),
+    };
+    
+    Ok(SharedTextureImportTextureInfo {
+        pixel_format,
+        coded_width: width,
+        coded_height: height,
+        visible_rect,
+        handle,
+    })
 }
 
 fn render_to_screen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -198,38 +338,15 @@ fn render_to_screen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     
     let mut renderer = renderer.lock().unwrap();
     
-    // Parse texture info
-    let pixel_format = texture_info.get::<JsString, _, _>(&mut cx, "pixelFormat")?.value(&mut cx);
-    let coded_size = texture_info.get::<JsObject, _, _>(&mut cx, "codedSize")?;
-    let width = coded_size.get::<JsNumber, _, _>(&mut cx, "width")?.value(&mut cx) as u32;
-    let height = coded_size.get::<JsNumber, _, _>(&mut cx, "height")?.value(&mut cx) as u32;
-    
-    let handle_obj = texture_info.get::<JsObject, _, _>(&mut cx, "handle")?;
-    let shared_handle = parse_shared_texture_handle(&mut cx, handle_obj)?;
+    let tex_info = parse_texture_info(&mut cx, texture_info)?;
     
     let transform_data = if let Some(transform_obj) = transform {
-        let matrix = transform_obj.get::<JsArray, _, _>(&mut cx, "matrix")?;
-        let mut transform_matrix = [0.0f64; 9];
-        for i in 0..9 {
-            let val = matrix.get::<JsNumber, _, _>(&mut cx, i as u32)?;
-            transform_matrix[i] = val.value(&mut cx);
-        }
-        Some(transform_matrix)
+        parse_transform_matrix(&mut cx, transform_obj)?
     } else {
         None
     };
     
-    let pixel_format_enum = match pixel_format.as_str() {
-        "bgra" => PixelFormat::Bgra,
-        "rgba" => PixelFormat::Rgba,
-        "rgbaf16" => PixelFormat::RgbaF16,
-        "nv12" => PixelFormat::Nv12,
-        "nv16" => PixelFormat::Nv16,
-        "p010le" => PixelFormat::P010Le,
-        _ => return cx.throw_error(format!("Unsupported pixel format: {}", pixel_format)),
-    };
-    
-    match renderer.render_shared_texture(&shared_handle, width, height, pixel_format_enum, transform_data) {
+    match renderer.render_shared_texture(&tex_info, transform_data) {
         Ok(_) => Ok(cx.undefined()),
         Err(e) => cx.throw_error(format!("Failed to render: {}", e)),
     }
@@ -254,13 +371,7 @@ fn render_buffer_to_screen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let data_slice = buffer.as_slice(&cx);
     
     let transform_data = if let Some(transform_obj) = transform {
-        let matrix = transform_obj.get::<JsArray, _, _>(&mut cx, "matrix")?;
-        let mut transform_matrix = [0.0f64; 9];
-        for i in 0..9 {
-            let val = matrix.get::<JsNumber, _, _>(&mut cx, i as u32)?;
-            transform_matrix[i] = val.value(&mut cx);
-        }
-        Some(transform_matrix)
+        parse_transform_matrix(&mut cx, transform_obj)?
     } else {
         None
     };
@@ -279,6 +390,104 @@ fn render_buffer_to_screen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         Ok(_) => Ok(cx.undefined()),
         Err(e) => cx.throw_error(format!("Failed to render buffer: {}", e)),
     }
+}
+
+fn render_region_to_screen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let device_handle = cx.argument::<JsObject>(0)?;
+    let texture_info = cx.argument::<JsObject>(1)?;
+    let source_rect = cx.argument::<JsObject>(2)?;
+    let dest_rect = cx.argument::<JsObject>(3)?;
+    let transform = cx.argument_opt(4)
+        .and_then(|v| v.downcast::<JsObject, _>(&mut cx).ok());
+    
+    let device_id = device_handle.get::<JsString, _, _>(&mut cx, "id")?.value(&mut cx);
+    
+    let renderers = DRM_RENDERERS.lock().unwrap();
+    let renderer = renderers.get(&device_id)
+        .ok_or_else(|| cx.throw_error::<_, ()>("Device not found").unwrap_err())?;
+    
+    let mut renderer = renderer.lock().unwrap();
+    
+    let tex_info = parse_texture_info(&mut cx, texture_info)?;
+    let src_rect = parse_rectangle(&mut cx, source_rect)?;
+    let dst_rect = parse_rectangle(&mut cx, dest_rect)?;
+    
+    let transform_data = if let Some(transform_obj) = transform {
+        parse_transform_matrix(&mut cx, transform_obj)?
+    } else {
+        None
+    };
+    
+    match renderer.render_region(&tex_info, &src_rect, &dst_rect, transform_data) {
+        Ok(_) => Ok(cx.undefined()),
+        Err(e) => cx.throw_error(format!("Failed to render region: {}", e)),
+    }
+}
+
+fn render_multi_screen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let device_handles = cx.argument::<JsArray>(0)?;
+    let texture_info = cx.argument::<JsObject>(1)?;
+    let mappings_array = cx.argument::<JsArray>(2)?;
+    
+    let handles_len = device_handles.len(&mut cx);
+    let mappings_len = mappings_array.len(&mut cx);
+    
+    let mut handles = Vec::new();
+    for i in 0..handles_len {
+        let handle = device_handles.get::<JsObject, _, _>(&mut cx, i)?;
+        let id = handle.get::<JsString, _, _>(&mut cx, "id")?.value(&mut cx);
+        handles.push(id);
+    }
+    
+    let tex_info = parse_texture_info(&mut cx, texture_info)?;
+    
+    let mut mappings = Vec::new();
+    for i in 0..mappings_len {
+        let mapping = mappings_array.get::<JsObject, _, _>(&mut cx, i)?;
+        
+        let source_rect = mapping.get::<JsObject, _, _>(&mut cx, "sourceRect")?;
+        let src_rect = parse_rectangle(&mut cx, source_rect)?;
+        
+        let target = mapping.get::<JsObject, _, _>(&mut cx, "target")?;
+        let screen_target = parse_screen_target(&mut cx, target)?;
+        
+        let transform = if let Ok(transform_obj) = mapping.get::<JsObject, _, _>(&mut cx, "transform") {
+            parse_transform_matrix(&mut cx, transform_obj)?
+        } else {
+            None
+        };
+        
+        mappings.push(RegionMapping {
+            source_rect: src_rect,
+            target: screen_target,
+            transform,
+        });
+    }
+    
+    let renderers = DRM_RENDERERS.lock().unwrap();
+    
+    for mapping in &mappings {
+        let screen_id = mapping.target.screen_id as usize;
+        if screen_id >= handles.len() {
+            continue;
+        }
+        
+        let device_id = &handles[screen_id];
+        if let Some(renderer) = renderers.get(device_id) {
+            let mut renderer = renderer.lock().unwrap();
+            
+            let dest_rect = Rectangle {
+                x: mapping.target.dest_x.unwrap_or(0),
+                y: mapping.target.dest_y.unwrap_or(0),
+                width: mapping.target.dest_width.unwrap_or(mapping.source_rect.width),
+                height: mapping.target.dest_height.unwrap_or(mapping.source_rect.height),
+            };
+            
+            let _ = renderer.render_region(&tex_info, &mapping.source_rect, &dest_rect, mapping.transform);
+        }
+    }
+    
+    Ok(cx.undefined())
 }
 
 fn create_transform(mut cx: FunctionContext) -> JsResult<JsObject> {
@@ -393,36 +602,11 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("getScreenInfo", get_screen_info)?;
     cx.export_function("renderToScreen", render_to_screen)?;
     cx.export_function("renderBufferToScreen", render_buffer_to_screen)?;
+    cx.export_function("renderRegionToScreen", render_region_to_screen)?;
+    cx.export_function("renderMultiScreen", render_multi_screen)?;
     cx.export_function("createTransform", create_transform)?;
     cx.export_function("applyTransform", apply_transform)?;
     cx.export_function("composeTransforms", compose_transforms)?;
     
     Ok(())
-}
-
-struct SharedTexturePlane {
-    stride: u32,
-    offset: u64,
-    size: u64,
-    fd: i32,
-}
-
-struct NativePixmap {
-    planes: Vec<SharedTexturePlane>,
-    modifier: String,
-    supportsZeroCopyWebGpuImport: bool,
-}
-
-#[derive(Default)]
-struct SharedTextureHandle {
-    nativePixmap: Option<NativePixmap>,
-}
-
-enum PixelFormat {
-    Bgra,
-    Rgba,
-    RgbaF16,
-    Nv12,
-    Nv16,
-    P010Le,
 }

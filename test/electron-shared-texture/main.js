@@ -1,8 +1,8 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
 
 // Import myde-display native module
-// In real usage, this would be: const { DrmDevice, SharedTexture, TransformUtil } = require('myde-display');
+// In real usage, this would be: const { DrmDevice, SharedTexture, TransformUtil, RegionMapper, MultiScreenRenderer } = require('myde-display');
 // For testing, we'll simulate the API
 const mydeDisplay = {
   DrmDevice: class {
@@ -33,12 +33,51 @@ const mydeDisplay = {
       }
     }
     
+    renderRegion(textureInfo, sourceRect, destRect, transform) {
+      console.log('[myde-display] Rendering region:', {
+        source: sourceRect,
+        dest: destRect,
+        hasTransform: !!transform
+      });
+    }
+    
     renderBuffer(buffer, width, height, pixelFormat, transform) {
       console.log('[myde-display] Rendering buffer:', { width, height, pixelFormat });
     }
     
     close() {
       console.log('[myde-display] DRM device closed');
+    }
+  },
+  MultiScreenRenderer: class {
+    constructor() {
+      this.devices = new Map();
+    }
+    
+    addDevice(devicePath) {
+      if (!this.devices.has(devicePath)) {
+        const device = new mydeDisplay.DrmDevice(devicePath);
+        this.devices.set(devicePath, device);
+      }
+      return this.devices.get(devicePath);
+    }
+    
+    renderToMultipleScreens(textureInfo, mappings) {
+      console.log('[myde-display] Multi-screen render:', {
+        mappingsCount: mappings.length,
+        mappings: mappings.map(m => ({
+          source: m.sourceRect,
+          target: m.target,
+          hasTransform: !!m.transform
+        }))
+      });
+    }
+    
+    closeAll() {
+      for (const device of this.devices.values()) {
+        device.close();
+      }
+      this.devices.clear();
     }
   },
   SharedTexture: {
@@ -50,6 +89,93 @@ const mydeDisplay = {
           handle: { nativePixmap }
         })
       };
+    }
+  },
+  RegionMapper: class {
+    constructor() {
+      this.mappings = [];
+    }
+    
+    addMapping(sourceRect, target, transform) {
+      this.mappings.push({ sourceRect, target, transform });
+      return this;
+    }
+    
+    addGridMapping(sourceWidth, sourceHeight, columns, rows, screens, transforms) {
+      const cellWidth = sourceWidth / columns;
+      const cellHeight = sourceHeight / rows;
+      
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < columns; col++) {
+          const index = row * columns + col;
+          if (index >= screens.length) break;
+          
+          this.mappings.push({
+            sourceRect: {
+              x: col * cellWidth,
+              y: row * cellHeight,
+              width: cellWidth,
+              height: cellHeight
+            },
+            target: screens[index],
+            transform: transforms?.[index]
+          });
+        }
+      }
+      return this;
+    }
+    
+    addHorizontalSplit(sourceWidth, sourceHeight, screens, transforms) {
+      const segmentWidth = sourceWidth / screens.length;
+      
+      for (let i = 0; i < screens.length; i++) {
+        this.mappings.push({
+          sourceRect: {
+            x: i * segmentWidth,
+            y: 0,
+            width: segmentWidth,
+            height: sourceHeight
+          },
+          target: screens[i],
+          transform: transforms?.[i]
+        });
+      }
+      return this;
+    }
+    
+    addVerticalSplit(sourceWidth, sourceHeight, screens, transforms) {
+      const segmentHeight = sourceHeight / screens.length;
+      
+      for (let i = 0; i < screens.length; i++) {
+        this.mappings.push({
+          sourceRect: {
+            x: 0,
+            y: i * segmentHeight,
+            width: sourceWidth,
+            height: segmentHeight
+          },
+          target: screens[i],
+          transform: transforms?.[i]
+        });
+      }
+      return this;
+    }
+    
+    addCustomRegion(x, y, width, height, screenId, transform) {
+      this.mappings.push({
+        sourceRect: { x, y, width, height },
+        target: { screenId },
+        transform
+      });
+      return this;
+    }
+    
+    getMappings() {
+      return [...this.mappings];
+    }
+    
+    clear() {
+      this.mappings = [];
     }
   },
   TransformUtil: {
@@ -82,6 +208,15 @@ const mydeDisplay = {
         matrix: [1, 0, x, 0, 1, y, 0, 0, 1]
       };
     },
+    flip(horizontal, vertical) {
+      return {
+        matrix: [
+          horizontal ? -1 : 1, 0, 0,
+          0, vertical ? -1 : 1, 0,
+          0, 0, 1
+        ]
+      };
+    },
     compose(...transforms) {
       let result = [1, 0, 0, 0, 1, 0, 0, 0, 1];
       for (const t of transforms) {
@@ -104,14 +239,21 @@ const mydeDisplay = {
   }
 };
 
-// Create DRM device instance
-let drmDevice = null;
+// Multi-screen renderer instance
+let multiRenderer = null;
 
 function createWindow() {
+  // Get all available displays
+  const displays = screen.getAllDisplays();
+  console.log(`Found ${displays.length} display(s):`);
+  displays.forEach((d, i) => {
+    console.log(`  Display ${i}: ${d.bounds.width}x${d.bounds.height} at (${d.bounds.x}, ${d.bounds.y})`);
+  });
+
   // Create the offscreen rendering window
   const osrWindow = new BrowserWindow({
-    width: 800,
-    height: 600,
+    width: 1920,
+    height: 1080,
     show: false,
     webPreferences: {
       offscreen: {
@@ -123,23 +265,32 @@ function createWindow() {
     }
   });
 
-  // Create a display window to show the rendered result (optional)
-  const displayWindow = new BrowserWindow({
-    width: 800,
-    height: 600,
-    show: true,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
-    }
-  });
+  // Create display windows for each physical display
+  const displayWindows = [];
+  for (let i = 0; i < displays.length; i++) {
+    const display = displays[i];
+    const win = new BrowserWindow({
+      x: display.bounds.x,
+      y: display.bounds.y,
+      width: display.bounds.width,
+      height: display.bounds.height,
+      fullscreen: true,
+      show: true,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.join(__dirname, 'preload.js')
+      }
+    });
+    displayWindows.push(win);
+  }
 
-  // Initialize DRM device
+  // Initialize multi-screen renderer
+  multiRenderer = new mydeDisplay.MultiScreenRenderer();
+  
+  // Add DRM devices
   try {
-    drmDevice = new mydeDisplay.DrmDevice('/dev/dri/card0');
-    const screens = drmDevice.getScreenInfo();
-    console.log('Available screens:', screens);
+    multiRenderer.addDevice('/dev/dri/card0');
   } catch (error) {
     console.error('Failed to initialize DRM device:', error);
   }
@@ -147,6 +298,9 @@ function createWindow() {
   // Set frame rate for offscreen rendering
   osrWindow.webContents.setFrameRate(30);
 
+  // Region mapping configuration
+  let currentMappingMode = 'single'; // 'single', 'horizontal', 'vertical', 'grid', 'custom'
+  
   // Handle paint events from offscreen renderer
   osrWindow.webContents.on('paint', (event, dirty, texture) => {
     if (!texture) {
@@ -154,78 +308,116 @@ function createWindow() {
       return;
     }
 
-    console.log('Paint event received:', {
-      dirty,
-      textureInfo: texture.textureInfo
-    });
-
-    // Get the shared texture info from Electron
     const textureInfo = texture.textureInfo;
+    const textureWidth = textureInfo.codedSize.width;
+    const textureHeight = textureInfo.codedSize.height;
 
-    // Create SharedTexture from Electron's texture info
-    const sharedTexture = mydeDisplay.SharedTexture.fromNativePixmap(
-      textureInfo.handle.nativePixmap,
-      textureInfo.codedSize.width,
-      textureInfo.codedSize.height,
-      textureInfo.pixelFormat
-    );
+    // Create region mapper
+    const mapper = new mydeDisplay.RegionMapper();
 
-    // Apply some transformations (e.g., rotate 45 degrees)
-    const rotation = mydeDisplay.TransformUtil.rotation(
-      Math.PI / 4,  // 45 degrees
-      textureInfo.codedSize.width / 2,
-      textureInfo.codedSize.height / 2
-    );
+    switch (currentMappingMode) {
+      case 'single':
+        // Render full texture to first screen
+        mapper.addCustomRegion(0, 0, textureWidth, textureHeight, 0);
+        break;
 
-    const scale = mydeDisplay.TransformUtil.scale(1.2, 1.2);
+      case 'horizontal':
+        // Split texture horizontally across screens
+        const hScreens = displays.map((_, i) => ({ screenId: i }));
+        mapper.addHorizontalSplit(textureWidth, textureHeight, hScreens);
+        break;
 
-    const translation = mydeDisplay.TransformUtil.translation(100, 50);
+      case 'vertical':
+        // Split texture vertically across screens
+        const vScreens = displays.map((_, i) => ({ screenId: i }));
+        mapper.addVerticalSplit(textureWidth, textureHeight, vScreens);
+        break;
 
-    const transform = mydeDisplay.TransformUtil.compose(
-      translation,
-      scale,
-      rotation
-    );
+      case 'grid':
+        // Split texture into 2x2 grid
+        const gridScreens = [
+          { screenId: 0 },
+          { screenId: displays.length > 1 ? 1 : 0 },
+          { screenId: displays.length > 2 ? 2 : 0 },
+          { screenId: displays.length > 3 ? 3 : 0 },
+        ];
+        mapper.addGridMapping(textureWidth, textureHeight, 2, 2, gridScreens);
+        break;
 
-    // Render to DRM display
-    if (drmDevice) {
-      try {
-        drmDevice.renderSharedTexture(sharedTexture.getTextureInfo(), transform);
-      } catch (error) {
-        console.error('Failed to render to DRM:', error);
-      }
+      case 'custom':
+        // Custom regions with transforms
+        mapper.addCustomRegion(
+          0, 0,
+          textureWidth / 2, textureHeight / 2,
+          0,
+          mydeDisplay.TransformUtil.rotation(Math.PI / 6, textureWidth / 4, textureHeight / 4)
+        );
+        
+        if (displays.length > 1) {
+          mapper.addCustomRegion(
+            textureWidth / 2, 0,
+            textureWidth / 2, textureHeight / 2,
+            1,
+            mydeDisplay.TransformUtil.scale(0.8, 0.8)
+          );
+        }
+        
+        mapper.addCustomRegion(
+          0, textureHeight / 2,
+          textureWidth, textureHeight / 2,
+          0,
+          mydeDisplay.TransformUtil.translation(0, 0)
+        );
+        break;
     }
 
-    // Also send to display window for visualization
-    displayWindow.webContents.send('texture-update', {
-      textureInfo: textureInfo,
-      dirty: dirty
+    // Get mappings and render
+    const mappings = mapper.getMappings();
+    multiRenderer.renderToMultipleScreens(textureInfo, mappings);
+
+    // Send to display windows for visualization
+    displayWindows.forEach((win, i) => {
+      win.webContents.send('texture-update', {
+        screenId: i,
+        textureInfo: textureInfo,
+        dirty: dirty,
+        mappingMode: currentMappingMode
+      });
     });
 
-    // Release the texture when done
+    // Release the texture
     texture.release();
+  });
+
+  // Handle IPC from renderer
+  ipcMain.on('set-mapping-mode', (event, mode) => {
+    currentMappingMode = mode;
+    console.log(`Mapping mode changed to: ${mode}`);
+  });
+
+  ipcMain.on('get-screen-info', (event) => {
+    const screenInfos = displays.map((d, i) => ({
+      id: i,
+      bounds: d.bounds,
+      workArea: d.workArea,
+      scaleFactor: d.scaleFactor
+    }));
+    event.reply('screen-info', screenInfos);
+  });
+
+  ipcMain.on('get-displays', (event) => {
+    event.reply('displays', displays);
   });
 
   // Load a webpage to render
   osrWindow.loadURL('https://github.com');
   
-  // Load display page
-  displayWindow.loadFile(path.join(__dirname, 'display.html'));
-
-  // Handle IPC from renderer
-  ipcMain.on('get-screen-info', (event) => {
-    if (drmDevice) {
-      const screens = drmDevice.getScreenInfo();
-      event.reply('screen-info', screens);
-    }
+  // Load display pages
+  displayWindows.forEach((win, i) => {
+    win.loadFile(path.join(__dirname, 'display.html'));
   });
 
-  ipcMain.on('apply-transform', (event, transformOptions) => {
-    console.log('Applying transform:', transformOptions);
-    // Transform will be applied in next paint event
-  });
-
-  return { osrWindow, displayWindow };
+  return { osrWindow, displayWindows };
 }
 
 // App lifecycle
@@ -240,10 +432,10 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  // Cleanup DRM device
-  if (drmDevice) {
-    drmDevice.close();
-    drmDevice = null;
+  // Cleanup
+  if (multiRenderer) {
+    multiRenderer.closeAll();
+    multiRenderer = null;
   }
   
   if (process.platform !== 'darwin') {
@@ -253,8 +445,8 @@ app.on('window-all-closed', () => {
 
 // Handle app termination
 app.on('before-quit', () => {
-  if (drmDevice) {
-    drmDevice.close();
-    drmDevice = null;
+  if (multiRenderer) {
+    multiRenderer.closeAll();
+    multiRenderer = null;
   }
 });

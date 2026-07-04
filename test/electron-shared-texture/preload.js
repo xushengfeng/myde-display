@@ -13,9 +13,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     });
   },
   
-  // Transform controls
-  applyTransform: (transformOptions) => {
-    ipcRenderer.send('apply-transform', transformOptions);
+  // Displays
+  getDisplays: () => {
+    ipcRenderer.send('get-displays');
+  },
+  onDisplays: (callback) => {
+    ipcRenderer.on('displays', (event, displays) => {
+      callback(displays);
+    });
+  },
+  
+  // Mapping mode
+  setMappingMode: (mode) => {
+    ipcRenderer.send('set-mapping-mode', mode);
   },
   
   // Texture updates

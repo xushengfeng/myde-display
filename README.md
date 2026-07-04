@@ -6,7 +6,9 @@ A Node.js native module for DRM rendering and screen management, built with Neon
 
 - **DRM Rendering**: Render textures directly to the screen using Linux DRM (Direct Rendering Manager) without a desktop environment
 - **SharedTexture API**: Compatible with Electron's SharedTexture handle structure for DMA-BUF support
-- **Geometric Transformations**: Apply arbitrary rotations, scaling, and translations to textures
+- **Multi-Screen Support**: Split and render different texture regions to different screens
+- **Region-Based Rendering**: Extract and render specific rectangular regions from a texture
+- **Geometric Transformations**: Apply arbitrary rotations, scaling, and translations to each region independently
 - **Screen Information**: Retrieve detailed information about connected displays
 - **Multiple Pixel Formats**: Support for RGBA, BGRA, NV12, NV16, P010LE, and RGBAF16
 - **High Performance**: Built with Rust for optimal performance and memory safety
@@ -196,6 +198,87 @@ const rotationAroundCenter = TransformUtil.rotation(
 );
 ```
 
+### Multi-Screen Region Rendering
+
+```typescript
+import { 
+  DrmDevice,
+  SharedTexture,
+  RegionMapper,
+  TransformUtil,
+  listDrmDevices,
+  PixelFormat 
+} from 'myde-display';
+
+// Create texture (e.g., from Electron offscreen rendering)
+const texture = SharedTexture.fromBuffer(
+  textureData,
+  3840,  // 4K width
+  2160,  // 4K height
+  'rgba' as PixelFormat
+);
+
+// Create region mapper
+const mapper = new RegionMapper();
+
+// Example 1: Horizontal split across 2 screens
+mapper.addHorizontalSplit(
+  3840, 2160,
+  [
+    { screenId: 0 },
+    { screenId: 1 },
+  ]
+);
+
+// Example 2: 2x2 grid
+mapper.addGridMapping(
+  3840, 2160,
+  2, 2,  // columns, rows
+  [
+    { screenId: 0 },
+    { screenId: 1 },
+    { screenId: 2 },
+    { screenId: 3 },
+  ]
+);
+
+// Example 3: Custom regions with transforms
+const mapper2 = new RegionMapper();
+
+// Top-left quadrant, rotated
+mapper2.addCustomRegion(
+  0, 0,                    // source position
+  1920, 1080,              // source size
+  0,                       // target screen
+  TransformUtil.rotation(Math.PI / 4, 960, 540)
+);
+
+// Top-right quadrant, scaled
+mapper2.addCustomRegion(
+  1920, 0,
+  1920, 1080,
+  1,
+  TransformUtil.scale(0.8, 0.8)
+);
+
+// Bottom half, no transform
+mapper2.addCustomRegion(
+  0, 1080,
+  3840, 1080,
+  0
+);
+
+// Render to multiple screens
+const devices = listDrmDevices();
+const device = new DrmDevice(devices[0]);
+device.renderRegion(
+  texture.getTextureInfo(),
+  mapper2.getMappings()[0].sourceRect,
+  { x: 0, y: 0, width: 1920, height: 1080 },
+  mapper2.getMappings()[0].transform
+);
+```
+
 ## API Reference
 
 ### Classes
@@ -236,8 +319,32 @@ Utility class for geometric transformations.
 - `TransformUtil.rotation(angle: number, originX?: number, originY?: number): Transform` - Creates rotation transform
 - `TransformUtil.scale(scaleX: number, scaleY?: number, originX?: number, originY?: number): Transform` - Creates scale transform
 - `TransformUtil.translation(x: number, y: number): Transform` - Creates translation transform
+- `TransformUtil.flip(horizontal?: boolean, vertical?: boolean): Transform` - Creates flip transform
 - `TransformUtil.apply(transform: Transform, point: Point): Point` - Applies transform to a point
 - `TransformUtil.compose(...transforms: Transform[]): Transform` - Composes multiple transforms
+
+#### `RegionMapper`
+
+Utility class for mapping texture regions to screens.
+
+**Methods:**
+- `addMapping(sourceRect: Rectangle, target: ScreenTarget, transform?: Transform): this` - Adds a region mapping
+- `addGridMapping(sourceWidth, sourceHeight, columns, rows, screens, transforms?): this` - Adds grid-based mapping
+- `addHorizontalSplit(sourceWidth, sourceHeight, screens, transforms?): this` - Adds horizontal split mapping
+- `addVerticalSplit(sourceWidth, sourceHeight, screens, transforms?): this` - Adds vertical split mapping
+- `addCustomRegion(x, y, width, height, screenId, transform?): this` - Adds custom region mapping
+- `getMappings(): RegionMapping[]` - Gets all mappings
+- `clear(): void` - Clears all mappings
+
+#### `MultiScreenRenderer`
+
+Manages rendering to multiple DRM devices/screens.
+
+**Methods:**
+- `addDevice(devicePath: string): DrmDevice` - Adds a DRM device
+- `removeDevice(devicePath: string): void` - Removes a DRM device
+- `renderToMultipleScreens(textureInfo, mappings): void` - Renders regions to multiple screens
+- `closeAll(): void` - Closes all devices
 
 ### Functions
 
@@ -366,6 +473,40 @@ interface Transform {
 interface Point {
   x: number;
   y: number;
+}
+```
+
+#### `Rectangle`
+
+```typescript
+interface Rectangle {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+```
+
+#### `ScreenTarget`
+
+```typescript
+interface ScreenTarget {
+  screenId: number;
+  connectorId?: number;
+  destX?: number;
+  destY?: number;
+  destWidth?: number;
+  destHeight?: number;
+}
+```
+
+#### `RegionMapping`
+
+```typescript
+interface RegionMapping {
+  sourceRect: Rectangle;
+  target: ScreenTarget;
+  transform?: Transform;
 }
 ```
 
