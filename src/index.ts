@@ -1,4 +1,5 @@
 import native from '../index.node';
+import { BlendMode } from './types/native';
 import type {
   NativeModule,
   DrmDeviceHandle,
@@ -15,7 +16,6 @@ import type {
   Transform,
   Point,
   RenderOptions,
-  BlendMode,
 } from './types/native';
 
 const addon: NativeModule = native;

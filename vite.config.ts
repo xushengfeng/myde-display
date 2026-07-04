@@ -8,6 +8,7 @@ export default defineConfig({
       rollupTypes: true,
     }),
   ],
+  assetsInclude: ['**/*.node'],
   build: {
     lib: {
       entry: 'src/index.ts',
@@ -15,7 +16,7 @@ export default defineConfig({
       fileName: 'index',
     },
     rollupOptions: {
-      external: ['./index.node'],
+      external: [/\.node$/],
     },
   },
 });
