@@ -11,8 +11,7 @@ name = "myde_display"
 crate-type = ["cdylib"]
 
 [dependencies]
-neon = "1"
-drm = "0.15"
+drm = "0.14"
 drm-fourcc = "2.2"
 gbm = "0.18"
 udev = "0.9"

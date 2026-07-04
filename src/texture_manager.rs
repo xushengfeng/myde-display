@@ -82,8 +82,8 @@ impl TextureManager {
         self.textures.get_mut(id)
     }
 
-    pub fn list_textures(&self) -> Vec<&TextureHandle> {
-        self.textures.values().map(|t| &TextureHandle {
+    pub fn list_textures(&self) -> Vec<TextureHandle> {
+        self.textures.values().map(|t| TextureHandle {
             id: t.id.clone(),
             width: t.width,
             height: t.height,

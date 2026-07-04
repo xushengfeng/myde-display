@@ -1,10 +1,9 @@
 use anyhow::{Result, anyhow};
 use drm::control::Device as ControlDevice;
 use drm::Device;
-use drm_fourcc::DrmFormat;
 use gbm::Device as GbmDevice;
 use std::fs::{File, OpenOptions};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,9 +11,23 @@ pub struct DrmDevice {
     file: File,
 }
 
+impl AsFd for DrmDevice {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+}
+
 impl AsRawFd for DrmDevice {
     fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         self.file.as_raw_fd()
+    }
+}
+
+impl Clone for DrmDevice {
+    fn clone(&self) -> Self {
+        DrmDevice {
+            file: self.file.try_clone().expect("Failed to clone file descriptor"),
+        }
     }
 }
 
@@ -64,11 +77,11 @@ pub struct SharedTexturePlane {
 pub struct NativePixmap {
     pub planes: Vec<SharedTexturePlane>,
     pub modifier: String,
-    pub supportsZeroCopyWebGpuImport: bool,
+    pub supports_zero_copy_webgpu_import: bool,
 }
 
 pub struct SharedTextureHandle {
-    pub nativePixmap: Option<NativePixmap>,
+    pub native_pixmap: Option<NativePixmap>,
 }
 
 pub struct SharedTextureImportTextureInfo {
@@ -79,6 +92,7 @@ pub struct SharedTextureImportTextureInfo {
     pub handle: SharedTextureHandle,
 }
 
+#[derive(Clone)]
 pub struct Rectangle {
     pub x: u32,
     pub y: u32,
@@ -86,6 +100,7 @@ pub struct Rectangle {
     pub height: u32,
 }
 
+#[derive(Clone, Copy)]
 pub enum PixelFormat {
     Bgra,
     Rgba,
@@ -145,7 +160,7 @@ impl DrmRenderer {
                     
                     if let Some(mode) = connector.modes().first() {
                         self.current_connector = Some(*connector_handle);
-                        self.current_crtc = Some(crtc);
+                        self.current_crtc = crtc;
                         self.current_mode = Some(*mode);
                         return Ok(());
                     }
@@ -166,28 +181,33 @@ impl DrmRenderer {
                         .and_then(|encoder_handle| self.device.get_encoder(encoder_handle).ok());
                     
                     let (encoder_id, crtc_id) = if let Some(encoder) = encoder {
-                        (encoder.handle().raw(), encoder.crtc().raw())
+                        let enc_id: u32 = encoder.handle().into();
+                        let crtc_id: u32 = encoder.crtc().map(|c| c.into()).unwrap_or(0);
+                        (enc_id, crtc_id)
                     } else {
                         (0, 0)
                     };
                     
                     let modes: Vec<DisplayMode> = connector.modes().iter().map(|mode| {
+                        let (hdisplay, vdisplay) = mode.size();
+                        let (hsync_start, hsync_end, htotal) = mode.hsync();
+                        let (vsync_start, vsync_end, vtotal) = mode.vsync();
                         DisplayMode {
                             clock: mode.clock(),
-                            hdisplay: mode.hdisplay(),
-                            hsync_start: mode.hsync_start(),
-                            hsync_end: mode.hsync_end(),
-                            htotal: mode.htotal(),
+                            hdisplay,
+                            hsync_start,
+                            hsync_end,
+                            htotal,
                             hskew: mode.hskew(),
-                            vdisplay: mode.vdisplay(),
-                            vsync_start: mode.vsync_start(),
-                            vsync_end: mode.vsync_end(),
-                            vtotal: mode.vtotal(),
+                            vdisplay,
+                            vsync_start,
+                            vsync_end,
+                            vtotal,
                             vscan: mode.vscan(),
                             vrefresh: mode.vrefresh(),
-                            flags: mode.flags(),
-                            type_: mode.mode_type(),
-                            name: mode.name().to_string(),
+                            flags: mode.flags().bits(),
+                            type_: mode.mode_type().bits(),
+                            name: mode.name().to_string_lossy().into_owned(),
                         }
                     }).collect();
                     
@@ -204,6 +224,7 @@ impl DrmRenderer {
                         drm::control::connector::SubPixel::VerticalRgb => "vertical_rgb",
                         drm::control::connector::SubPixel::VerticalBgr => "vertical_bgr",
                         drm::control::connector::SubPixel::None => "none",
+                        _ => "unknown",
                     };
                     
                     let (width, height, refresh_rate) = if let Some(mode) = modes.first() {
@@ -212,8 +233,11 @@ impl DrmRenderer {
                         (0, 0, 0.0)
                     };
                     
+                    let connector_id: u32 = (*connector_handle).into();
+                    let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
+                    
                     screens.push(ScreenInfo {
-                        connector_id: connector_handle.raw(),
+                        connector_id,
                         encoder_id,
                         crtc_id,
                         width,
@@ -221,8 +245,8 @@ impl DrmRenderer {
                         refresh_rate,
                         is_connected: connector.state() == drm::control::connector::State::Connected,
                         modes,
-                        physical_width: connector.size().0,
-                        physical_height: connector.size().1,
+                        physical_width,
+                        physical_height,
                         subpixel: subpixel.to_string(),
                         connection: connection.to_string(),
                     });
@@ -238,7 +262,7 @@ impl DrmRenderer {
         texture_info: &SharedTextureImportTextureInfo,
         transform: Option<[f64; 9]>,
     ) -> Result<()> {
-        if let Some(native_pixmap) = &texture_info.handle.nativePixmap {
+        if let Some(native_pixmap) = &texture_info.handle.native_pixmap {
             self.render_native_pixmap(
                 native_pixmap,
                 texture_info.coded_width,
@@ -263,7 +287,8 @@ impl DrmRenderer {
         let crtc = self.current_crtc.ok_or_else(|| anyhow!("No CRTC"))?;
         let mode = self.current_mode.ok_or_else(|| anyhow!("No mode"))?;
         
-        let (screen_width, screen_height) = (mode.hdisplay() as u32, mode.vdisplay() as u32);
+        let (hdisplay, vdisplay) = mode.size();
+        let (screen_width, screen_height) = (hdisplay as u32, vdisplay as u32);
         
         let mut buffer = self.gbm.create_buffer_object::<()>(
             screen_width,
@@ -272,11 +297,11 @@ impl DrmRenderer {
             gbm::BufferObjectFlags::SCANOUT | gbm::BufferObjectFlags::WRITE,
         )?;
         
-        {
-            let mut mapping = buffer.map_mut(&self.gbm)?;
-            let mapping_slice = mapping.as_mut();
+        let plane_data = self.map_dma_buf_planes(pixmap)?;
+        
+        buffer.map_mut(0, 0, screen_width, screen_height, |mapping| {
+            let mapping_slice = mapping.buffer_mut();
             
-            // Clear buffer
             for pixel in mapping_slice.chunks_exact_mut(4) {
                 pixel[0] = 0;
                 pixel[1] = 0;
@@ -284,10 +309,6 @@ impl DrmRenderer {
                 pixel[3] = 0;
             }
             
-            // Map the DMA-BUF planes
-            let plane_data = self.map_dma_buf_planes(pixmap)?;
-            
-            // Render the texture
             self.render_mapped_data(
                 mapping_slice,
                 &plane_data,
@@ -298,9 +319,9 @@ impl DrmRenderer {
                 &pixel_format,
                 transform,
             );
-        }
+        })?;
         
-        let framebuffer = self.gbm.add_framebuffer(&buffer, 32, 32)?;
+        let framebuffer = self.device.add_framebuffer(&buffer, 32, 32)?;
         
         self.device.set_crtc(
             crtc,
@@ -323,14 +344,12 @@ impl DrmRenderer {
                 let file = File::from_raw_fd(plane.fd);
                 let mut data = vec![0u8; plane.size as usize];
                 
-                // Read from the DMA-BUF file descriptor
                 use std::io::Read;
                 let mut reader = std::io::BufReader::new(&file);
                 reader.read_exact(&mut data)?;
                 
                 plane_data.push(data);
                 
-                // Prevent the file from being closed
                 std::mem::forget(file);
             }
         }
@@ -356,7 +375,7 @@ impl DrmRenderer {
             PixelFormat::P010Le => 2,
         };
         
-        let plane_stride = if let Some(plane) = plane_data.first() {
+        let _plane_stride = if let Some(plane) = plane_data.first() {
             (src_width * bytes_per_pixel) as usize
         } else {
             return;
@@ -393,7 +412,6 @@ impl DrmRenderer {
                                     dst[dst_offset + 3] = plane[src_offset as usize + 3];
                                 }
                                 _ => {
-                                    // Simplified handling for other formats
                                     dst[dst_offset] = plane[src_offset as usize];
                                     dst[dst_offset + 1] = plane[src_offset as usize];
                                     dst[dst_offset + 2] = plane[src_offset as usize];
@@ -418,15 +436,14 @@ impl DrmRenderer {
         let crtc = self.current_crtc.ok_or_else(|| anyhow!("No CRTC"))?;
         let mode = self.current_mode.ok_or_else(|| anyhow!("No mode"))?;
         
-        let (screen_width, screen_height) = (mode.hdisplay() as u32, mode.vdisplay() as u32);
+        let (hdisplay, vdisplay) = mode.size();
+        let (screen_width, screen_height) = (hdisplay as u32, vdisplay as u32);
         
-        // Validate source rect
         let src_x = source_rect.x.min(texture_info.coded_width);
         let src_y = source_rect.y.min(texture_info.coded_height);
         let src_width = source_rect.width.min(texture_info.coded_width - src_x);
         let src_height = source_rect.height.min(texture_info.coded_height - src_y);
         
-        // Validate dest rect
         let dst_x = dest_rect.x.min(screen_width);
         let dst_y = dest_rect.y.min(screen_height);
         let dst_width = dest_rect.width.min(screen_width - dst_x);
@@ -439,11 +456,19 @@ impl DrmRenderer {
             gbm::BufferObjectFlags::SCANOUT | gbm::BufferObjectFlags::WRITE,
         )?;
         
-        {
-            let mut mapping = buffer.map_mut(&self.gbm)?;
-            let mapping_slice = mapping.as_mut();
+        let native_pixmap_data = if let Some(native_pixmap) = &texture_info.handle.native_pixmap {
+            Some(self.map_dma_buf_planes(native_pixmap)?)
+        } else {
+            None
+        };
+        
+        let coded_width = texture_info.coded_width;
+        let coded_height = texture_info.coded_height;
+        let pixel_format = texture_info.pixel_format;
+        
+        buffer.map_mut(0, 0, screen_width, screen_height, |mapping| {
+            let mapping_slice = mapping.buffer_mut();
             
-            // Clear buffer
             for pixel in mapping_slice.chunks_exact_mut(4) {
                 pixel[0] = 0;
                 pixel[1] = 0;
@@ -451,13 +476,10 @@ impl DrmRenderer {
                 pixel[3] = 0;
             }
             
-            // If we have a native pixmap, map and render the region
-            if let Some(native_pixmap) = &texture_info.handle.native_pixmap {
-                let plane_data = self.map_dma_buf_planes(native_pixmap)?;
-                
+            if let Some(plane_data) = &native_pixmap_data {
                 self.render_region_from_mapped_data(
                     mapping_slice,
-                    &plane_data,
+                    plane_data,
                     src_x,
                     src_y,
                     src_width,
@@ -466,17 +488,17 @@ impl DrmRenderer {
                     dst_y,
                     dst_width,
                     dst_height,
-                    texture_info.coded_width,
-                    texture_info.coded_height,
+                    coded_width,
+                    coded_height,
                     screen_width,
                     screen_height,
-                    &texture_info.pixel_format,
+                    &pixel_format,
                     transform,
                 );
             }
-        }
+        })?;
         
-        let framebuffer = self.gbm.add_framebuffer(&buffer, 32, 32)?;
+        let framebuffer = self.device.add_framebuffer(&buffer, 32, 32)?;
         
         self.device.set_crtc(
             crtc,
@@ -504,7 +526,7 @@ impl DrmRenderer {
         full_src_width: u32,
         full_src_height: u32,
         full_dst_width: u32,
-        full_dst_height: u32,
+        _full_dst_height: u32,
         pixel_format: &PixelFormat,
         transform: Option<[f64; 9]>,
     ) {
@@ -518,26 +540,21 @@ impl DrmRenderer {
         if let Some(plane) = plane_data.first() {
             for y in 0..dst_height {
                 for x in 0..dst_width {
-                    // Map destination pixel to source pixel
                     let (mapped_x, mapped_y) = if let Some(matrix) = transform {
                         self.apply_transform_to_point(matrix, x as f64, y as f64)
                     } else {
-                        // Scale from destination region to source region
                         let scale_x = src_width as f64 / dst_width as f64;
                         let scale_y = src_height as f64 / dst_height as f64;
                         (x as f64 * scale_x, y as f64 * scale_y)
                     };
                     
-                    // Add source offset
                     let src_pixel_x = (mapped_x + src_x as f64) as i32;
                     let src_pixel_y = (mapped_y + src_y as f64) as i32;
                     
-                    // Check bounds
                     if src_pixel_x >= 0 && src_pixel_x < full_src_width as i32 &&
                        src_pixel_y >= 0 && src_pixel_y < full_src_height as i32 {
                         let src_offset = ((src_pixel_y as u32 * full_src_width + src_pixel_x as u32) * bytes_per_pixel) as usize;
                         
-                        // Calculate destination position
                         let dst_pixel_x = dst_x + x;
                         let dst_pixel_y = dst_y + y;
                         let dst_offset = ((dst_pixel_y * full_dst_width + dst_pixel_x) * 4) as usize;
@@ -582,7 +599,8 @@ impl DrmRenderer {
         let crtc = self.current_crtc.ok_or_else(|| anyhow!("No CRTC"))?;
         let mode = self.current_mode.ok_or_else(|| anyhow!("No mode"))?;
         
-        let (screen_width, screen_height) = (mode.hdisplay() as u32, mode.vdisplay() as u32);
+        let (hdisplay, vdisplay) = mode.size();
+        let (screen_width, screen_height) = (hdisplay as u32, vdisplay as u32);
         
         let mut buffer = self.gbm.create_buffer_object::<()>(
             screen_width,
@@ -591,11 +609,9 @@ impl DrmRenderer {
             gbm::BufferObjectFlags::SCANOUT | gbm::BufferObjectFlags::WRITE,
         )?;
         
-        {
-            let mut mapping = buffer.map_mut(&self.gbm)?;
-            let mapping_slice = mapping.as_mut();
+        buffer.map_mut(0, 0, screen_width, screen_height, |mapping| {
+            let mapping_slice = mapping.buffer_mut();
             
-            // Clear buffer
             for pixel in mapping_slice.chunks_exact_mut(4) {
                 pixel[0] = 0;
                 pixel[1] = 0;
@@ -603,7 +619,6 @@ impl DrmRenderer {
                 pixel[3] = 0;
             }
             
-            // Render the buffer
             self.render_buffer_data(
                 mapping_slice,
                 data,
@@ -614,9 +629,9 @@ impl DrmRenderer {
                 &pixel_format,
                 transform,
             );
-        }
+        })?;
         
-        let framebuffer = self.gbm.add_framebuffer(&buffer, 32, 32)?;
+        let framebuffer = self.device.add_framebuffer(&buffer, 32, 32)?;
         
         self.device.set_crtc(
             crtc,

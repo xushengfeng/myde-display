@@ -1,4 +1,4 @@
-use nalgebra::{Matrix3, Vector2, Vector3};
+use nalgebra::{Matrix3, Vector3};
 
 pub struct TransformManager;
 
@@ -116,15 +116,15 @@ impl TransformManager {
         ]
     }
 
-    pub fn create_rotation(angle: f64, origin_x: f64, origin_y: f64) -> Transform {
+    pub fn create_rotation(&self, angle: f64, origin_x: f64, origin_y: f64) -> Transform {
         self.create_transform(angle, 1.0, 1.0, 0.0, 0.0, origin_x, origin_y)
     }
 
-    pub fn create_scale(scale_x: f64, scale_y: f64, origin_x: f64, origin_y: f64) -> Transform {
+    pub fn create_scale(&self, scale_x: f64, scale_y: f64, origin_x: f64, origin_y: f64) -> Transform {
         self.create_transform(0.0, scale_x, scale_y, 0.0, 0.0, origin_x, origin_y)
     }
 
-    pub fn create_translation(x: f64, y: f64) -> Transform {
+    pub fn create_translation(&self, x: f64, y: f64) -> Transform {
         self.create_transform(0.0, 1.0, 1.0, x, y, 0.0, 0.0)
     }
 
